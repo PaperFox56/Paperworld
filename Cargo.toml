@@ -1,0 +1,12 @@
+[package]
+name = "paperworld"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+
+[dependencies]
+#godot = { git = "https://github.com/godot-rust/gdext.git", branch = "master" }
+godot = "0.2.4"

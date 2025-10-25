@@ -1,0 +1,4 @@
+/target
+/godot/
+src/compute_shader.rs
+src/custom_grid.rs
