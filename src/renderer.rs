@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use godot::builtin::{Array, PackedByteArray, Rid};
 use godot::classes::image::Format;
 use godot::classes::rendering_device::{DataFormat, TextureUsageBits, UniformType};
-use godot::classes::{ Image, RdShaderFile, RdTextureFormat, RdTextureView, RdUniform, RenderingDevice, RenderingServer, ResourceImporterShaderFile, Texture2Drd, TextureRect};
+use godot::classes::{ Image, RdShaderFile, RdTextureFormat, RdTextureView, RdUniform, RenderingDevice, RenderingServer, Texture2Drd, TextureRect};
 use godot::global::godot_print;
 use godot::obj::{Gd, NewGd};
 use godot::tools::load as godot_load;

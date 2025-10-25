@@ -1,7 +1,7 @@
 mod renderer;
 mod player;
 
-use std::{collections::HashMap, os::unix::thread, time::Instant};
+use std::{time::Instant};
 
 use godot::{classes::{rendering_device::UniformType, InputEvent, TextureRect}, prelude::*};
 
