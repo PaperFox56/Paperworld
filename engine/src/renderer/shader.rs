@@ -6,7 +6,7 @@ use godot::{builtin::Rid, classes::RdUniform};
 pub(super) enum BufferType {
     StorageBuffer,
     UniformBuffer,
-    TextureBuffer,
+    Texture,
 }
 
 pub(super) struct Uniform {

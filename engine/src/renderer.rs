@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 use std::collections::hash_map;
 
@@ -19,21 +18,20 @@ use shader::*;
 
 ///!
 /// Almost every rendering related code will be handled by this module.
-/// 
-/// 
-/// 
+///
+///
+///
 /// Here are some important informations about the way this code manage buffers.
 /// [`UniformManager`] is the structure in charge of storing the buffers allocated as well as their associated uniforms.
 /// They are stored in separate sets that cn be specified when executing a shader.
 /// Some sets are reserved by the library and already contains some uniforms. You can add update them and bind them to your own
 /// shader but be sure to check that the binding and label you choose are not already taken or really nasty things might happen.
-/// 
+///
 /// ### Set `core`:
 ///     - texture `color_buffer` : 0
 ///     - storage buffer `data` : 1 (to be changed soon)
 ///     - uniform buffer `camera`: 2
-/// 
-
+///
 
 ///  This should be a thing in the standard library
 type Dict<T> = HashMap<String, T>;
@@ -47,10 +45,9 @@ pub struct Renderer {
     viewport_texture: Gd<Texture2Drd>,
 }
 
-
 /// Manage the [`RenderingDevice`] and every GPU related ressource.
 /// You only need one of it, please don't create more.
-/// 
+///
 impl Renderer {
     /// Build a new Renderer ready to be used
     pub fn new() -> Self {
@@ -82,10 +79,12 @@ impl Renderer {
                 | TextureUsageBits::CAN_UPDATE_BIT
                 | TextureUsageBits::SAMPLING_BIT,
         );
+        // Empty image just to fill the buffer
         let image = Image::create_empty(1024, 1024, false, Format::RGBAF)
             .expect("Couldn't create the color buffer");
         let image_bytes = image.get_data();
 
+        // I don't know what this is but we need it
         let texture_view = RdTextureView::new_gd();
 
         self.create_texture_uniform(
@@ -102,7 +101,7 @@ impl Renderer {
             .unwrap();
 
         // assign the texture to the viewport
-        let texture_rid = self.get_buffer_rid("color_buffer");
+        let texture_rid = self.get_buffer_rid("core", "color_buffer");
         self.viewport_texture.set_texture_rd_rid(texture_rid);
     }
 
@@ -111,16 +110,15 @@ impl Renderer {
     }
 
     /// Generic helper to create an `RdUniform` and register it in the uniform manager
-    fn create_uniform_generic<F: FnOnce() -> Rid>(
+    fn create_uniform_generic(
         &mut self,
         set: &str,
         label: &str,
         binding: i32,
         uniform_type: UniformType,
         buffer_type: BufferType,
-        create_resource: F,
+        rid: Rid,
     ) -> Result<(), String> {
-        let rid = create_resource();
         match rid {
             Rid::Valid(_) => {
                 let mut uniform = RdUniform::new_gd();
@@ -133,7 +131,7 @@ impl Renderer {
 
                 Ok(())
             }
-            Rid::Invalid => Err(format!("Couldn't create `{label}`")),
+            Rid::Invalid => Err(format!("Couldn't create {buffer_type:?} `{label}`")),
         }
     }
 
@@ -145,13 +143,15 @@ impl Renderer {
         size: u32,
         binding: i32,
     ) -> Result<(), String> {
+        let rid = self.rendering_device.storage_buffer_create(size);
+
         self.create_uniform_generic(
             set,
             label,
             binding,
             UniformType::STORAGE_BUFFER,
             BufferType::StorageBuffer,
-            || self.rendering_device.storage_buffer_create(size),
+            rid,
         )
     }
 
@@ -164,13 +164,14 @@ impl Renderer {
         size: u32,
         binding: i32,
     ) -> Result<(), String> {
+        let rid = self.rendering_device.uniform_buffer_create(size);
         self.create_uniform_generic(
             set,
             label,
             binding,
             UniformType::UNIFORM_BUFFER,
             BufferType::UniformBuffer,
-            || self.rendering_device.uniform_buffer_create(size),
+            rid,
         )
     }
 
@@ -184,13 +185,14 @@ impl Renderer {
         view: Gd<RdTextureView>,
         binding: i32,
     ) -> Result<(), String> {
+        let rid = self.rendering_device.texture_create(&format, &view);
         self.create_uniform_generic(
             set,
             label,
             binding,
             u_type,
-            BufferType::TextureBuffer,
-            || self.rendering_device.texture_create(&format, &view),
+            BufferType::Texture,
+            rid,
         )
     }
 
@@ -213,7 +215,7 @@ impl Renderer {
             BufferType::StorageBuffer | BufferType::UniformBuffer => self
                 .rendering_device
                 .buffer_update(buffer, offset, data.len() as u32, data),
-            BufferType::TextureBuffer => self.rendering_device.texture_update(buffer, offset, data),
+            BufferType::Texture => self.rendering_device.texture_update(buffer, offset, data),
         };
 
         match e {
@@ -226,52 +228,51 @@ impl Renderer {
     }
 
     #[inline]
-    fn get_buffer_rid(&self, label: &str) -> Rid {
-        self.uniforms
-            .get(label)
-            .expect(&format!(
-                "Uniform `{label}` not found, consider binding the buffer"
-            ))
+    fn get_buffer_rid(&self, set: &str, label: &str) -> Rid {
+        self.uniform_manager
+            .get_uniform(set, label)
             .get_ids()
             .get(0)
             .unwrap()
     }
 
-    pub fn get_buffer_data(&mut self, label: &str) -> PackedByteArray {
-        let buffer = self.get_buffer_rid(label);
+    pub fn get_buffer_data(&mut self, set: &str, label: &str) -> PackedByteArray {
+        let buffer = self.get_buffer_rid(set, label);
         self.rendering_device.buffer_get_data(buffer)
     }
 
     /// Create a new compute pipeline, bind the required uniforms, and call the shader
-    pub fn execute_shader(&mut self, shader_label: &str, uniform_config: UniformConfig) {
+    pub fn execute_shader(&mut self, shader_label: &str, sets_to_bind: &[(&str, usize)]) {
         let shader_rid = self.shaders.get(shader_label).unwrap().get_rid();
-
-        // We need get the inner uniforms to be bound to the shader
-        let mut uniforms: Vec<Gd<RdUniform>> = self
-            .uniforms
-            .iter()
-            .filter_map(|(l, u)| match uniform_config {
-                UniformConfig::All => Some(u.clone_inner()),
-                UniformConfig::Custom(list) if list.contains(l) => Some(u.clone_inner()),
-                _ => None,
-            })
-            .collect();
-
-        uniforms.sort_by_key(|u| u.get_binding());
-
-        let uniforms = Array::from(uniforms.as_slice());
-
-        let uniform_set = self
-            .rendering_device
-            .uniform_set_create(&uniforms, shader_rid, 0);
 
         // Compute pipeline
         let pipeline = self.rendering_device.compute_pipeline_create(shader_rid);
         let compute_list = self.rendering_device.compute_list_begin();
         self.rendering_device
             .compute_list_bind_compute_pipeline(compute_list, pipeline);
-        self.rendering_device
-            .compute_list_bind_uniform_set(compute_list, uniform_set, 0);
+
+        // bind the required uniform sets
+        for (set_label, set_index) in sets_to_bind {
+            // We need get the inner uniforms to be bound to the shader
+            let mut uniforms: Vec<Gd<RdUniform>> = self
+                .uniform_manager
+                .get_set_iter(set_label)
+                .map(|(_, uniform)| uniform.clone_inner())
+                .collect();
+
+            uniforms.sort_by_key(|u| u.get_binding());
+
+            let uniforms = Array::from(uniforms.as_slice());
+
+            let uniform_set = self
+                .rendering_device
+                .uniform_set_create(&uniforms, shader_rid, 0);
+            self.rendering_device.compute_list_bind_uniform_set(
+                compute_list,
+                uniform_set,
+                *set_index as u32,
+            );
+        }
         self.rendering_device
             .compute_list_dispatch(compute_list, 32, 32, 1);
         self.rendering_device.compute_list_end();
@@ -325,13 +326,15 @@ impl Drop for Renderer {
         });
 
         // free every buffer
-        self.uniform_manager.get_iter().for_each(|(set_label, label, uniform)| {
+        self.uniform_manager
+            .get_iter()
+            .for_each(|(set_label, label, uniform)| {
                 godot_print!("Freeing uniform `{label}` of set `{set_label}`");
                 uniform
                     .get_ids()
                     .iter_shared()
                     .for_each(|rid| self.rendering_device.free_rid(rid));
-        });
+            });
     }
 }
 
@@ -345,17 +348,6 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
-
-struct UniformSetBinding<'b> {
-    set_label: &'b str,
-    binding: usize,
-}
-
-/// Allow to choose different sets of uniforms when running a shader.
-pub enum UniformConfig<'b> {
-    Custom(&'b[UniformSetBinding<'b>]),
-    All,
-}
 
 /// Abstraction over the classic uniform sets.
 /// This structure will contains the uniforms created by the `create_*_uniform` functions.

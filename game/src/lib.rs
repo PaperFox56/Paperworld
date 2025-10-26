@@ -3,7 +3,7 @@ use engine::renderer::*;
 use std::time::Instant;
 
 use godot::{
-    classes::{InputEvent, TextureRect, rendering_device::UniformType},
+    classes::{InputEvent, TextureRect},
     prelude::*,
 };
 
@@ -118,16 +118,6 @@ struct CameraData {
 }
 
 impl CameraData {
-    fn new(position: Vector3, front: Vector3, right: Vector3, up: Vector3, fov: f32) -> Self {
-        Self {
-            position,
-            front,
-            right,
-            up,
-            fov,
-        }
-    }
-
     fn to_byte_array(&self) -> PackedByteArray {
         let mut out = Vec::new();
 
