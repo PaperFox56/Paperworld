@@ -1,4 +1,11 @@
 /target
-/godot/
+/engine/target
+/game/target
+/godot
 src/compute_shader.rs
 src/custom_grid.rs
+src/player.rs
+game/src/custom_grid.rs
+game/src/player.rs
+.gitignore
+game/src/compute_shader.rs

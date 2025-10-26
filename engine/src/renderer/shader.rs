@@ -2,10 +2,10 @@ use std::ops::Deref;
 
 use godot::{builtin::Rid, classes::RdUniform};
 
-
 #[derive(Debug, Copy, Clone)]
 pub(super) enum BufferType {
     StorageBuffer,
+    UniformBuffer,
     TextureBuffer,
 }
 
@@ -15,10 +15,12 @@ pub(super) struct Uniform {
 }
 
 impl Uniform {
-
-    pub fn new(inner: godot::obj::Gd<RdUniform>, buffer_type: BufferType,) -> Self {
-
-        assert_eq!(inner.get_ids().is_empty(), false, "Tried to build a uniform with no buffer attached");
+    pub fn new(inner: godot::obj::Gd<RdUniform>, buffer_type: BufferType) -> Self {
+        assert_eq!(
+            inner.get_ids().is_empty(),
+            false,
+            "Tried to build a uniform with no buffer attached"
+        );
 
         Self { inner, buffer_type }
     }
@@ -40,7 +42,7 @@ impl Deref for Uniform {
     }
 }
 
-pub(super) struct ComputeShader{
+pub(super) struct ComputeShader {
     rid: Rid,
 }
 
