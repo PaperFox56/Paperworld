@@ -1,12 +1,12 @@
-use std::collections::HashMap;
-use std::collections::hash_map;
-
+use godot::builtin::PackedFloat32Array;
+use godot::builtin::Vector3;
 use godot::builtin::{Array, PackedByteArray, Rid};
-use godot::classes::image::Format;
+use std::collections::HashMap;
+
 use godot::classes::rendering_device::{DataFormat, TextureUsageBits, UniformType};
 use godot::classes::{
-    Image, RdShaderFile, RdTextureFormat, RdTextureView, RdUniform, RenderingDevice,
-    RenderingServer, Texture2Drd, TextureRect,
+    RdShaderFile, RdTextureFormat, RdTextureView, RdUniform, RenderingDevice, RenderingServer,
+    Texture2Drd, TextureRect,
 };
 use godot::global::godot_print;
 use godot::obj::{Gd, NewGd};
@@ -27,22 +27,29 @@ use shader::*;
 /// Some sets are reserved by the library and already contains some uniforms. You can add update them and bind them to your own
 /// shader but be sure to check that the binding and label you choose are not already taken or really nasty things might happen.
 ///
-/// ### Set `core`:
-///     - texture `color_buffer` : 0
-///     - storage buffer `data` : 1 (to be changed soon)
-///     - uniform buffer `camera`: 2
+/// ### Set `frame`:
+///     - 0: texture        `color_buffer`
+///     - 1: texture        `normal_buffer`
+///     - 2: texture        `uv_buffer`
+///     - 3: texture        `extra_buffer`
+///
+/// ### Set `core`
+///     - 0: storage buffer `global`
+///     - 0: uniform buffer `camera`
+///     - 0: storage buffer `voxel_data`
 ///
 
 ///  This should be a thing in the standard library
 type Dict<T> = HashMap<String, T>;
 
 pub struct Renderer {
+    viewport_resolution: (u32, u32),
+
     rendering_device: Gd<RenderingDevice>,
+    viewport_texture: Gd<Texture2Drd>,
 
     shaders: Dict<ComputeShader>,
     uniform_manager: UniformManager,
-
-    viewport_texture: Gd<Texture2Drd>,
 }
 
 /// Manage the [`RenderingDevice`] and every GPU related ressource.
@@ -50,12 +57,25 @@ pub struct Renderer {
 ///
 impl Renderer {
     /// Build a new Renderer ready to be used
-    pub fn new() -> Self {
+    pub fn new(width: u32, height: u32) -> Self {
         let rendering_device = RenderingServer::singleton()
             .get_rendering_device()
             .expect("Couldn't obtain the rendering device");
 
+        assert_eq!(
+            width % 32,
+            0,
+            "The viewport width should be a multiple of 32"
+        );
+
+        assert_eq!(
+            height % 32,
+            0,
+            "The viewport height should be a multiple of 32"
+        );
+
         Self {
+            viewport_resolution: (width, height),
             rendering_device,
             shaders: HashMap::new(),
             uniform_manager: UniformManager::new(),
@@ -66,6 +86,9 @@ impl Renderer {
     pub fn init(&mut self) {
         // bind the shaders
         self.load_shader_from_file("voxel_shader", "voxel_shader.glsl")
+            .unwrap();
+
+        self.load_shader_from_file("fragment", "fragment.glsl")
             .unwrap();
 
         // texture used as output
@@ -79,29 +102,46 @@ impl Renderer {
                 | TextureUsageBits::CAN_UPDATE_BIT
                 | TextureUsageBits::SAMPLING_BIT,
         );
-        // Empty image just to fill the buffer
-        let image = Image::create_empty(1024, 1024, false, Format::RGBAF)
-            .expect("Couldn't create the color buffer");
-        let image_bytes = image.get_data();
-
         // I don't know what this is but we need it
         let texture_view = RdTextureView::new_gd();
 
-        self.create_texture_uniform(
+        // We need four textures to contain the rendering information
+        for (binding, label) in ["color_buffer", "normal_buffer", "uv_buffer", "extra_buffer"]
+            .iter()
+            .enumerate()
+        {
+            self.create_texture_uniform(
+                "frame",
+                label,
+                UniformType::IMAGE,
+                texture_format.clone(),
+                texture_view.clone(),
+                binding as i32,
+            )
+            .unwrap();
+        }
+
+        // Create a uniform buffer for the camera's data
+        const CAMERA_DATA_SIZE: u32 = 16; // number of float values in the struct
+        self.create_uniform_uniform("core", "camera", CAMERA_DATA_SIZE * 4, 1)
+            .unwrap();
+        self.update_buffer(
             "core",
-            "color_buffer",
-            UniformType::IMAGE,
-            texture_format,
-            texture_view,
+            "camera",
             0,
+            &godot::builtin::PackedFloat32Array::from(&[0.; CAMERA_DATA_SIZE as usize])
+                .to_byte_array(),
         )
         .unwrap();
 
-        self.update_buffer("core", "color_buffer", 0, &image_bytes)
+        // Create a storage buffer to receive the voxel data
+        // for now we allocate 64kB + 16 bits for the metadata,
+        // at term we would like to have an object buffer and let the game allocate voxel buffers of arbitrary sizes
+        self.create_storage_uniform("core", "voxel_data", 1024 * 64 + 16, 2)
             .unwrap();
 
         // assign the texture to the viewport
-        let texture_rid = self.get_buffer_rid("core", "color_buffer");
+        let texture_rid = self.get_buffer_rid("frame", "color_buffer");
         self.viewport_texture.set_texture_rd_rid(texture_rid);
     }
 
@@ -186,14 +226,7 @@ impl Renderer {
         binding: i32,
     ) -> Result<(), String> {
         let rid = self.rendering_device.texture_create(&format, &view);
-        self.create_uniform_generic(
-            set,
-            label,
-            binding,
-            u_type,
-            BufferType::Texture,
-            rid,
-        )
+        self.create_uniform_generic(set, label, binding, u_type, BufferType::Texture, rid)
     }
 
     /// Update a buffer with the given value
@@ -241,9 +274,19 @@ impl Renderer {
         self.rendering_device.buffer_get_data(buffer)
     }
 
+    /// Excecute the default pipeline, you can use it or create your own.
+    pub fn render_frame(&mut self, camera_data: CameraData) {
+        self.update_buffer("core", "camera", 0, &camera_data.to_byte_array())
+            .unwrap();
+
+        self.execute_shader("voxel_shader", &["frame", "core"]);
+
+        self.execute_shader("fragment", &["frame"]);
+    }
+
     /// Create a new compute pipeline, bind the required uniforms, and call the shader
-    pub fn execute_shader(&mut self, shader_label: &str, sets_to_bind: &[(&str, usize)]) {
-        let shader_rid = self.shaders.get(shader_label).unwrap().get_rid();
+    pub fn execute_shader(&mut self, shader_label: &str, sets_to_bind: &[&str]) {
+        let shader_rid = self.shaders.get(shader_label).expect(&format!("Shader `{shader_label}` was not found")).get_rid();
 
         // Compute pipeline
         let pipeline = self.rendering_device.compute_pipeline_create(shader_rid);
@@ -252,7 +295,7 @@ impl Renderer {
             .compute_list_bind_compute_pipeline(compute_list, pipeline);
 
         // bind the required uniform sets
-        for (set_label, set_index) in sets_to_bind {
+        for (set_index, set_label) in sets_to_bind.iter().enumerate() {
             // We need get the inner uniforms to be bound to the shader
             let mut uniforms: Vec<Gd<RdUniform>> = self
                 .uniform_manager
@@ -264,17 +307,21 @@ impl Renderer {
 
             let uniforms = Array::from(uniforms.as_slice());
 
-            let uniform_set = self
-                .rendering_device
-                .uniform_set_create(&uniforms, shader_rid, 0);
+            let uniform_set =
+                self.rendering_device
+                    .uniform_set_create(&uniforms, shader_rid, set_index as u32);
             self.rendering_device.compute_list_bind_uniform_set(
                 compute_list,
                 uniform_set,
-                *set_index as u32,
+                set_index as u32,
             );
         }
+
+        let x_groups = self.viewport_resolution.0 / 32;
+        let y_groups = self.viewport_resolution.1 / 32;
+
         self.rendering_device
-            .compute_list_dispatch(compute_list, 32, 32, 1);
+            .compute_list_dispatch(compute_list, x_groups, y_groups, 1);
         self.rendering_device.compute_list_end();
 
         // execute
@@ -317,7 +364,7 @@ impl Renderer {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
-        godot_print!("Freeing the acquiered ressources");
+        godot_print!("Freeing the acquiered ressources...");
 
         // free every shader
         self.shaders.iter().for_each(|(label, shader)| {
@@ -335,6 +382,8 @@ impl Drop for Renderer {
                     .iter_shared()
                     .for_each(|rid| self.rendering_device.free_rid(rid));
             });
+
+        godot_print!("All resources have been succesfully freed!");
     }
 }
 
@@ -349,50 +398,44 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Abstraction over the classic uniform sets.
-/// This structure will contains the uniforms created by the `create_*_uniform` functions.
-struct UniformManager {
-    uniform_sets: Dict<Dict<Uniform>>,
+pub struct CameraData {
+    position: Vector3,
+    front: Vector3,
+    right: Vector3,
+    up: Vector3,
+
+    fov: f32,
 }
 
-impl UniformManager {
-    fn new() -> Self {
+impl CameraData {
+    pub fn new(position: Vector3, front: Vector3, right: Vector3, up: Vector3, fov: f32) -> Self {
         Self {
-            uniform_sets: Dict::new(),
+            position,
+            front,
+            right,
+            up,
+            fov,
         }
     }
 
-    /// Add a new uniform to the the structure. If the specified set doesn't exist, it will be created
-    fn add_uniform(&mut self, set: &str, label: &str, uniform: Uniform) {
-        let set = self
-            .uniform_sets
-            .entry(set.to_string())
-            .or_insert(Dict::new());
+    pub fn to_byte_array(&self) -> PackedByteArray {
+        let mut out = Vec::new();
 
-        set.insert(label.to_string(), uniform);
-    }
+        // zeros are added because the GPU is a bitch
 
-    fn get_uniform(&self, set: &str, label: &str) -> &Uniform {
-        self.uniform_sets
-            .get(set)
-            .expect(&format!("Uniform set `{set}` was not found"))
-            .get(label)
-            .expect(&format!("Couldn't find uniform `{label}` in set `{set}`"))
-    }
+        out.extend(self.position.to_array());
+        out.push(0.);
+        out.extend(self.front.to_array());
+        out.push(0.);
+        out.extend(self.right.to_array());
+        out.push(0.);
+        out.extend(self.up.to_array());
+        out.push(self.fov);
 
-    /// Return an iterator over every uniform
-    fn get_iter(&self) -> impl Iterator<Item = (&str, &str, &Uniform)> {
-        self.uniform_sets.iter().flat_map(|(set_label, set)| {
-            set.iter()
-                .map(move |(label, uniform)| (set_label.as_str(), label.as_str(), uniform))
-        })
-    }
+        let out = PackedFloat32Array::from(out).to_byte_array();
 
-    /// Return an iterator over a particular uniform set
-    fn get_set_iter(&self, set: &str) -> hash_map::Iter<'_, String, Uniform> {
-        self.uniform_sets
-            .get(set)
-            .expect(&format!("Uniform set `{set}` was not found"))
-            .iter()
+        //godot_print!("{:?}", out.len());
+
+        out
     }
 }

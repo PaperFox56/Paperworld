@@ -3,9 +3,16 @@ use engine::renderer::*;
 use std::time::Instant;
 
 use godot::{
-    classes::{InputEvent, TextureRect},
+    classes::{InputEvent, Label, TextureRect},
     prelude::*,
 };
+
+struct Parameters {
+    epsilon: f32,
+    ray_offset: f32,
+    intersection_offset: f32,
+    max_steps: f32,
+}
 
 #[derive(GodotClass)]
 #[class(base=Node)]
@@ -17,6 +24,17 @@ pub struct Game {
     viewport: Option<Gd<TextureRect>>,
     #[export]
     camera: Option<Gd<Camera3D>>,
+    #[export]
+    fps_indicator: Option<Gd<Label>>,
+    #[export]
+    epsilon: f32,
+    #[export]
+    ray_offset: f32,
+    #[export]
+    intersection_offset: f32,
+    #[export]
+    max_steps: f32,
+
     clock: Instant,
 }
 
@@ -25,9 +43,14 @@ impl INode for Game {
     fn init(base: Base<Node>) -> Self {
         Self {
             base,
-            renderer: Renderer::new(),
+            renderer: Renderer::new(800, 640),
             viewport: None,
             camera: None,
+            fps_indicator: None,
+            epsilon: 0.001,
+            ray_offset: 0.01,
+            intersection_offset: 0.001,
+            max_steps: 256.0,
             clock: Instant::now(),
         }
     }
@@ -39,50 +62,93 @@ impl INode for Game {
 
         self.renderer.bind(viewport);
 
-        let parameters_bytes = PackedFloat32Array::from([0.]).to_byte_array();
+        // Create parameters buffer with time and precision values
+        let parameters = [
+            0.0, // time
+            self.epsilon,
+            self.ray_offset,
+            self.intersection_offset,
+            self.max_steps as f32,
+        ];
+        let parameters_bytes = PackedFloat32Array::from(&parameters).to_byte_array();
 
         // Create a uniform buffer for our parameters
         self.renderer
-            .create_storage_uniform(
-                "core",
-                "data",
-                parameters_bytes.len() as u32,
-                1,
-            )
+            .create_storage_uniform("core", "global", parameters_bytes.len() as u32, 0)
             .unwrap();
         self.renderer
-            .update_buffer("core", "data", 0, &parameters_bytes)
+            .update_buffer("core", "global", 0, &parameters_bytes)
             .unwrap();
 
-        // Create a uniform buffer for the camera's data
-        const CAMERA_DATA_SIZE: u32 = 16;    // number of float values in the struct
+        // fill the voxel data
+        let voxels_per_units: f32 = 5.;
+        let (w, h, d): (i32, i32, i32) = (16, 16, 16);
+        let mut voxel_array = PackedInt32Array::new();
+        voxel_array.resize((w * h * d) as usize);
+
+        let mut index = 0;
+
+        godot_print!("{}", voxel_array.len());
+
+        for i in 0..w {
+            for j in 0..h {
+                for k in 0..d {
+                    if Vector3::new((i - w / 2) as f32, (j - h / 2) as f32, (k - d / 2) as f32)
+                        .length()
+                        < 6.
+                    {
+                        voxel_array.insert(index, 1);
+                    }
+
+                    index += 1;
+                }
+            }
+            godot_print!("{i}");
+        }
+
         self.renderer
-            .create_uniform_uniform(
+            .update_buffer(
                 "core",
-                "camera",
-                CAMERA_DATA_SIZE * 4,
-                2, 
+                "voxel_data",
+                0,
+                &PackedFloat32Array::from(&[voxels_per_units]).to_byte_array(),
             )
             .unwrap();
         self.renderer
-            .update_buffer("core", "camera", 0, &PackedFloat32Array::from(&[0.; CAMERA_DATA_SIZE as usize]).to_byte_array())
+            .update_buffer(
+                "core",
+                "voxel_data",
+                16,
+                &PackedInt32Array::from(&[w, h, d]).to_byte_array(),
+            )
             .unwrap();
+        self.renderer
+            .update_buffer("core", "voxel_data", 32, &voxel_array.to_byte_array())
+            .unwrap();
+
+        // add a custom shader
     }
 
-    fn physics_process(&mut self, _delta: f64) {
+    fn physics_process(&mut self, delta: f64) {
         let time = self.clock.elapsed().as_secs_f32();
-        let parameters_bytes = PackedFloat32Array::from([time]).to_byte_array();
+        let parameters = [
+            time,
+            self.epsilon,
+            self.ray_offset,
+            self.intersection_offset,
+            self.max_steps as f32,
+        ];
+        let parameters_bytes = PackedFloat32Array::from(&parameters).to_byte_array();
         self.renderer
-            .update_buffer("core", "data", 0, &parameters_bytes)
-            .unwrap();
-        self.renderer
-            .update_buffer("core", "camera", 0, &self.get_camera_data().to_byte_array())
+            .update_buffer("core", "global", 0, &parameters_bytes)
             .unwrap();
 
-        self.renderer
-            .execute_shader("voxel_shader", &[
-                ("core", 0),
-            ]);
+        self.renderer.render_frame(self.get_camera_data());
+
+        let fps = (1. / delta) as u32;
+        let fps = format!("FPS: {}", fps);
+
+        self.fps_indicator.as_mut().unwrap().set_text(&fps);
     }
 
     fn unhandled_key_input(&mut self, event: Gd<InputEvent>) {
@@ -98,46 +164,13 @@ impl Game {
 
         let transform = camera.get_camera_transform();
 
-        CameraData {
-            position: transform.origin,
-            front: transform.basis.col_c(),
-            right: transform.basis.col_a(),
-            up: transform.basis.col_b(),
-            fov: camera.get_fov(),
-        }
-    }
-}
-
-struct CameraData {
-    position: Vector3,
-    front: Vector3,
-    right: Vector3,
-    up: Vector3,
-
-    fov: f32,
-}
-
-impl CameraData {
-    fn to_byte_array(&self) -> PackedByteArray {
-        let mut out = Vec::new();
-
-        // zeros are added because the GPU is a bitch 
-
-        out.extend(self.position.to_array());
-        out.push(0.);
-        out.extend(self.front.to_array());
-        out.push(0.);
-        out.extend(self.right.to_array());
-        out.push(0.);
-        out.extend(self.up.to_array());
-        out.push(self.fov);
-
-
-        let out = PackedFloat32Array::from(out).to_byte_array();
-
-        //godot_print!("{:?}", out.len());
-
-        out
+        CameraData::new(
+            transform.origin,
+            transform.basis.col_c(),
+            transform.basis.col_a(),
+            transform.basis.col_b(),
+            camera.get_fov(),
+        )
     }
 }
 

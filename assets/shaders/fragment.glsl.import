@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://g4w5m16x2vyw"
+path="res://.godot/imported/fragment.glsl-18c866a69ddfb17dbdeda3027ec646ca.res"
+
+[deps]
+
+source_file="res://assets/shaders/fragment.glsl"
+dest_files=["res://.godot/imported/fragment.glsl-18c866a69ddfb17dbdeda3027ec646ca.res"]
+
+[params]
+
