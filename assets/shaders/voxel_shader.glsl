@@ -17,6 +17,7 @@ layout(set = 1, binding = 0, std430) readonly buffer parameters {
     float ray_offset;
     float intersection_offset;
     int max_steps;
+    bool debug_mode;
 }
 global;
 
@@ -79,6 +80,34 @@ void main() {
     // -----
 
     vec4 color = vec4(0, 0, 0, 1);
+    bool grid_point = false;
+
+    if (global.debug_mode) {
+        // Visualize a grid on the XZ plane at Y=0
+        // only the lines are visible
+        if (abs(ray_dir.y) > global.epsilon){
+            float t = -ray_origin.y / ray_dir.y;
+            if (t > 0.0) {
+                float epsilon = .03;
+
+                vec3 intersect_point = ray_origin + t * ray_dir;
+                float grid_size = 3.0; // size of each grid cell
+                float x = mod(intersect_point.x, grid_size);
+                float z = mod(intersect_point.z, grid_size);
+                if (x < epsilon || z < epsilon) {
+                    grid_point = true;
+
+                    color = vec4(1.);
+                    if (intersect_point.x > -epsilon && intersect_point.x < epsilon) {
+                        color = vec4(1., 0., 0., 1.);
+                    }
+                    else if (intersect_point.z > -epsilon && intersect_point.z < epsilon) {
+                        color = vec4(0., 0., 1., 1.);
+                    }
+                }
+            }
+        }
+    }
 
     // Handle near-zero components in ray direction
     for (int i = 0; i < 3; i++) {
@@ -106,7 +135,21 @@ void main() {
     if (inter.touched) {
         color = vec4(1.);
     } else {
-        color = background;
+        if (global.debug_mode && grid_point) {
+            //color = vec4(1.);
+        } else {
+            // create a gradient to simulate the sky
+            
+            vec3 horizon = normalize(vec3(ray.dir.x, 0.0, ray.dir.z));
+            float angle_to_horizon = ray.dir.y;
+
+            if (ray.dir.y < 0.0) {
+                color = vec4(.7) + angle_to_horizon * vec4(0.2 * vec3(1.0), 1.0);
+            } else {
+                color = background + (1 - angle_to_horizon) * 0.5 * light_color + angle_to_horizon * vec4(0.2 * vec3(1.0), 1.0);
+            }
+        }
+
     }
 
     // color = vec4(voxels.grid_size/16, 1.);

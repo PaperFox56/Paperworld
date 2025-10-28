@@ -7,13 +7,6 @@ use godot::{
     prelude::*,
 };
 
-struct Parameters {
-    epsilon: f32,
-    ray_offset: f32,
-    intersection_offset: f32,
-    max_steps: f32,
-}
-
 #[derive(GodotClass)]
 #[class(base=Node)]
 pub struct Game {
@@ -34,6 +27,8 @@ pub struct Game {
     intersection_offset: f32,
     #[export]
     max_steps: f32,
+    #[export]
+    debug_mode: bool,
 
     clock: Instant,
 }
@@ -51,6 +46,7 @@ impl INode for Game {
             ray_offset: 0.01,
             intersection_offset: 0.001,
             max_steps: 256.0,
+            debug_mode: false,
             clock: Instant::now(),
         }
     }
@@ -63,14 +59,9 @@ impl INode for Game {
         self.renderer.bind(viewport);
 
         // Create parameters buffer with time and precision values
-        let parameters = [
-            0.0, // time
-            self.epsilon,
-            self.ray_offset,
-            self.intersection_offset,
-            self.max_steps as f32,
-        ];
-        let parameters_bytes = PackedFloat32Array::from(&parameters).to_byte_array();
+        let parameters = [0.0; 5];
+        let mut parameters_bytes = PackedFloat32Array::from(&parameters).to_byte_array();
+        parameters_bytes.push(0);
 
         // Create a uniform buffer for our parameters
         self.renderer
@@ -82,29 +73,8 @@ impl INode for Game {
 
         // fill the voxel data
         let voxels_per_units: f32 = 5.;
-        let (w, h, d): (i32, i32, i32) = (16, 16, 16);
-        let mut voxel_array = PackedInt32Array::new();
-        voxel_array.resize((w * h * d) as usize);
 
-        let mut index = 0;
-
-        godot_print!("{}", voxel_array.len());
-
-        for i in 0..w {
-            for j in 0..h {
-                for k in 0..d {
-                    if Vector3::new((i - w / 2) as f32, (j - h / 2) as f32, (k - d / 2) as f32)
-                        .length()
-                        < 6.
-                    {
-                        voxel_array.insert(index, 1);
-                    }
-
-                    index += 1;
-                }
-            }
-            godot_print!("{i}");
-        }
+        let data = std::fs::read("assets/models/voxel_sphere.vx").expect("Couldn;t find the model");
 
         self.renderer
             .update_buffer(
@@ -119,11 +89,8 @@ impl INode for Game {
                 "core",
                 "voxel_data",
                 16,
-                &PackedInt32Array::from(&[w, h, d]).to_byte_array(),
+                &PackedByteArray::from(data),
             )
-            .unwrap();
-        self.renderer
-            .update_buffer("core", "voxel_data", 32, &voxel_array.to_byte_array())
             .unwrap();
 
         // add a custom shader
@@ -138,7 +105,8 @@ impl INode for Game {
             self.intersection_offset,
             self.max_steps as f32,
         ];
-        let parameters_bytes = PackedFloat32Array::from(&parameters).to_byte_array();
+        let mut parameters_bytes = PackedFloat32Array::from(&parameters).to_byte_array();
+        parameters_bytes.push(self.debug_mode as u8);
         self.renderer
             .update_buffer("core", "global", 0, &parameters_bytes)
             .unwrap();

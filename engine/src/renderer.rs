@@ -281,7 +281,7 @@ impl Renderer {
 
         self.execute_shader("voxel_shader", &["frame", "core"]);
 
-        self.execute_shader("fragment", &["frame"]);
+        //self.execute_shader("fragment", &["frame"]);
     }
 
     /// Create a new compute pipeline, bind the required uniforms, and call the shader
