@@ -2,7 +2,7 @@
 #version 450
 
 // Invocations in the (x, y, z) dimension
-layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
 /// Frame buffers
 layout(set = 0, binding = 0, rgba32f) uniform image2D color_buffer;
@@ -16,25 +16,37 @@ layout(set = 1, binding = 0, std430) readonly buffer parameters {
     float epsilon;
     float ray_offset;
     float intersection_offset;
-    int max_steps;
-    bool debug_mode;
+    float max_steps;
+    int debug_mode; // replaced bool with int for safer host packing (0/1)
 }
 global;
 
-// Camera data
+// Camera data - std140 requires vec3 to occupy 16 bytes; use vec4 to be explicit
 layout(set = 1, binding = 1, std140) uniform Camera {
-    vec3 position;
-    vec3 front;
-    vec3 right;
-    vec3 up;
-    float fov;
+    vec4 position; // .w unused (padding)
+    vec4 front;
+    vec4 right;
+    vec4 up;
+    vec4 cam_params; // cam_params.x = fov (degrees), other components free/padding
 }
 camera;
 
+
+#define PURE_LEAF 0 // all children cells have the same value
+#define HETEROGENIOUS_LEAF 1 // children cells have differents values
+#define NON_LEAF 2
+struct OctreeNode {
+    uint node_type;
+    uint children[8];
+    //uint padding_for_gpu[3];
+};
+
 layout(set = 1, binding = 2, std430) readonly buffer VoxelData {
     float voxels_per_unit;
-    uvec3 grid_size;
-    uint data[];
+    // We use an octree so the grid is always cubic
+    uint grid_size;
+    uint node_count;
+    OctreeNode tree[];
 }
 voxels;
 
@@ -47,19 +59,18 @@ struct RayData {
 struct IntersectionData {
     bool touched;
     vec3 global_pos;
-    uint voxel_index;
-    ivec3 voxel_coordinates;    // position of the voxel in the grid
+    vec3 grid_pos;
     vec3 normal;                // the face intersected
     vec2 uv;                    // the position on the face
-
-    float depth;                // distance from the camera
+    vec3 debug_info;
 };
 
-IntersectionData rayTraceThroughVoxelGrid(RayData ray);
+IntersectionData rayTraceThroughVoxelGrid(RayData ray, OctreeNode grid);
+IntersectionData rayTraceThroughVoxelOctree(RayData ray);
 
 void main() {
     /* Let's start by calculating the direction of the ray */
-    float fov = radians(camera.fov); // vertical FOV
+    float fov_rad = radians(camera.cam_params.x); // vertical FOV in radians
 
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     vec2 resolution = vec2(imageSize(color_buffer));
@@ -71,33 +82,44 @@ void main() {
     uv.x *= resolution.x / resolution.y;
 
     // compute ray direction
-    float scale = tan(radians(camera.fov) * 0.5);
+    float scale = tan(fov_rad * 0.5);
+    vec3 cam_front = camera.front.xyz;
+    vec3 cam_right = camera.right.xyz;
+    vec3 cam_up = camera.up.xyz;
+
     vec3 ray_dir = normalize(
-        -camera.front + uv.x * scale * camera.right + uv.y * scale * camera.up);
+        -cam_front + uv.x * scale * cam_right + uv.y * scale * cam_up);
     // Ray origin
-    vec3 ray_origin = camera.position;
+    vec3 ray_origin = camera.position.xyz;
 
     // -----
 
     vec4 color = vec4(0, 0, 0, 1);
     bool grid_point = false;
 
-    if (global.debug_mode) {
+    // used in debug mode to do Z-buffering
+    float grid_depth = 10000.;
+
+    if (global.debug_mode != 0) {
         // Visualize a grid on the XZ plane at Y=0
         // only the lines are visible
         if (abs(ray_dir.y) > global.epsilon){
             float t = -ray_origin.y / ray_dir.y;
             if (t > 0.0) {
-                float epsilon = .03;
+
+                grid_depth = t;
 
                 vec3 intersect_point = ray_origin + t * ray_dir;
+
+                float epsilon = .1 - exp(-t);
+
                 float grid_size = 3.0; // size of each grid cell
                 float x = mod(intersect_point.x, grid_size);
                 float z = mod(intersect_point.z, grid_size);
                 if (x < epsilon || z < epsilon) {
                     grid_point = true;
 
-                    color = vec4(1.);
+                    color = vec4(vec3(.7), 1.);
                     if (intersect_point.x > -epsilon && intersect_point.x < epsilon) {
                         color = vec4(1., 0., 0., 1.);
                     }
@@ -127,19 +149,25 @@ void main() {
         ray_origin, ray_dir, inv_dir
     };
 
-    IntersectionData inter = rayTraceThroughVoxelGrid(ray);
+    IntersectionData inter = rayTraceThroughVoxelOctree(ray);
 
     vec4 background = vec4(0, .5, .8, 1.);
     vec4 light_color = vec4(.8, .8, .5, 1.0);
 
+    float depth = length(inter.global_pos - ray_origin);
+
     if (inter.touched) {
-        color = vec4(1.);
+        if (global.debug_mode != 0 && depth > grid_depth && grid_point) {
+        } else {
+            //color = vec4(floor(inter.grid_pos)/float(voxels.grid_size), 1.);
+            color = vec4(1.);
+        }
     } else {
-        if (global.debug_mode && grid_point) {
+        if (global.debug_mode != 0 && grid_point) {
             //color = vec4(1.);
         } else {
             // create a gradient to simulate the sky
-            
+
             vec3 horizon = normalize(vec3(ray.dir.x, 0.0, ray.dir.z));
             float angle_to_horizon = ray.dir.y;
 
@@ -152,96 +180,64 @@ void main() {
 
     }
 
-    // color = vec4(voxels.grid_size/16, 1.);
-    // color = vec4(1);
-
     imageStore(color_buffer, pixel, color);
     imageStore(normal_buffer, pixel, vec4(inter.normal, 1.));
     imageStore(uv_buffer, pixel, vec4(inter.uv, 0., 1.));
-    imageStore(extra_buffer, pixel, vec4(inter.global_pos, inter.depth));
+    imageStore(extra_buffer, pixel, vec4(inter.debug_info, 0.));
 }
 
 bool are_close(float a, float b) {
     return abs(a - b) <= global.epsilon;
 }
 
-IntersectionData rayTraceThroughVoxelGrid(RayData ray) {
+/*
+Do a raytracing in a 2x2x2 voxel grid.
+This function assumes that the ray data is normalised to the voxel space (1 voxel for 1 unit)
+The ray's origin should be the intersection point of the ray with the grid.
+*/
+IntersectionData rayTraceThroughVoxelGrid(RayData ray, OctreeNode grid, float size) {
     IntersectionData inter;
     inter.touched = false;
-
-    float voxels_per_unit = voxels.voxels_per_unit;
-    float voxel_size = 1. / voxels_per_unit;
-    //vec3 grid_size_in_units = voxels.grid_size / voxels_per_unit;
+    inter.normal = vec3(0.0);
+    inter.uv = vec2(0.0);
+    inter.debug_info = vec3(0.0);
 
     // Get the starting position of the ray relative to the voxel grid
-    vec3 grid_pos = ray.pos * voxels_per_unit + voxels.grid_size / 2;
+    vec3 grid_pos = ray.pos;
+    uint step_count = 0u;
 
-    bool in_bounds = true;
+    // define the size of the voxel grid
+    float upper_bound = 2.0;
 
-    // check if we are in the bounds
-    /*
-    * P is the position vector, R is the ray direction, D is the dimention vector of the grid
-     * the ray has for expression: P = P0 + t*R
-     * for every coordinate i we have: (-Pi / Ri) < t < (Di - Pi) / Ri or (-Pi / Ri) > t > (Di - Pi) depending on the sign of Ri
-     *
-     * So we need to calculate every boundary of the possibles intervals of t, then chose the smallest value that is still positive
-     */
-
-    // faces: x = 0, y = 0, z = 0; left side of the inaquation
-    vec3 t0 = -grid_pos * ray.invDir;
-    // faces: x = Dx, y = Dy, z = Dz; right side of the inaquation
-    vec3 t1 = (voxels.grid_size - grid_pos) * ray.invDir;
-
-    for (int i = 0; i < 3; i++) {
-        if (ray.dir[i] < 0) {
-            float temp = t0[i];
-            t0[i] = t1[i];
-            t1[i] = temp;
-        }
+    if (grid.node_type == PURE_LEAF) {
+        // We do a little trick that treat the entire grid as a single voxel, speeding up the traversal
+        size *= 2;
+        upper_bound = 1.0;
     }
 
-    float lower_bound = max(max(t0.x, t0.y), t0.z);
-    float higher_bound = min(min(t1.x, t1.y), t1.z);
-
-    if (lower_bound >= higher_bound || higher_bound <= 0) {
-        in_bounds = false;
-    }
-    else {
-        grid_pos = grid_pos + (max(0.0, lower_bound) + global.ray_offset) * ray.dir;
-    }
-    /*
-    *    if (lower_bound > higher_bound) {
-     *        first_voxel_touched = ivec3(100);
-     *        in_bounds = true;
-    }*/
-
-    if (!in_bounds) {
-        return inter;
-    }
-
-    int max_steps = global.max_steps;
-    int _step = 0;
+    grid_pos /= size;
 
     // Now we enter a loop, we check if the current voxel is on, if so we stop, if not, we go to the next cell
-    while (grid_pos.x >= 0 && grid_pos.y >= 0 && grid_pos.z >= 0
-        && grid_pos.x < voxels.grid_size.x && grid_pos.y < voxels.grid_size.y && grid_pos.z < voxels.grid_size.z
-        && _step < max_steps) {
+    while (grid_pos.x > 0.0 && grid_pos.y > 0.0 && grid_pos.z > 0.0
+        && grid_pos.x < upper_bound && grid_pos.y < upper_bound && grid_pos.z < upper_bound) {
+        step_count += 1u;
         // get voxel index
-        ivec3 voxel_coords = ivec3(grid_pos);
-        vec3 pos_relative_to_voxel = grid_pos - voxel_coords;
+        ivec3 voxel_coords = ivec3(floor(grid_pos));
 
-        // i = x * H * D + y * D + z
-        uint voxel_index = (voxel_coords.x * voxels.grid_size.y + voxel_coords.y) * voxels.grid_size.z + voxel_coords.z;
+        vec3 pos_relative_to_voxel = grid_pos - vec3(voxel_coords);
 
-        if (voxels.data[voxel_index] == 1) {
-            vec3 normal = vec3(0);
-            vec3 u, v;
+        // i = (x<<2) + (y<<1) + z
+        uint voxel_index = (uint(voxel_coords.x) << 2) + (uint(voxel_coords.y) << 1) + uint(voxel_coords.z);
 
-            bool negative_one = false;
+        if (voxel_index < 8u && grid.children[voxel_index] == 1u) {
+            inter.debug_info.y = 1.;
+            vec3 normal = vec3(0.0);
+            vec3 u = vec3(0.0);
+            vec3 v = vec3(0.0);
 
             // Find the face that was hit by checking which coordinate is closest to 0 or 1
             vec3 distances_to_0 = pos_relative_to_voxel;
-            vec3 distances_to_1 = vec3(1) - pos_relative_to_voxel;
+            vec3 distances_to_1 = vec3(1.0) - pos_relative_to_voxel;
 
             float min_dist = 1.0;
             int hit_axis = -1;
@@ -261,29 +257,36 @@ IntersectionData rayTraceThroughVoxelGrid(RayData ray) {
             }
 
             // Set the normal based on which face was hit
-            normal = vec3(0);
             if (hit_axis >= 0) {
-                normal[hit_axis] = hit_at_zero ? -1 : 1;
+                normal[hit_axis] = hit_at_zero ? -1.0 : 1.0;
             }
 
-            // Calculate UV basis vectors
-            for (int i = 0; i < 3; i++) {
-                u[(i+1) % 3] = abs(normal[i]);
-                v[(i+2) % 3] = abs(normal[i]);
+            // Calculate a stable tangent/bitangent basis
+            vec3 n = normal;
+            if (length(n) == 0.0) {
+                // degenerate: set a fallback normal (should not happen when voxel is filled)
+                n = vec3(0.0, 1.0, 0.0);
             }
+            vec3 tangent;
+            if (abs(n.x) > 0.5) {
+                tangent = normalize(vec3(n.y, -n.x, 0.0));
+            } else {
+                tangent = normalize(vec3(0.0, n.z, -n.y));
+            }
+            vec3 bitangent = normalize(cross(n, tangent));
+            u = tangent;
+            v = bitangent;
 
             inter.touched = true;
-            inter.voxel_index = voxel_index;
-            inter.voxel_coordinates = voxel_coords;
             inter.normal = normal;
-            inter.uv = vec2(dot(u, pos_relative_to_voxel), dot(v, pos_relative_to_voxel));
 
-            vec3 absolute_pos = grid_pos * voxel_size;
-            inter.global_pos = absolute_pos;
-            inter.depth = length(absolute_pos - ray.pos);
+            pos_relative_to_voxel *= size; // back to voxel space
+            pos_relative_to_voxel = mod(pos_relative_to_voxel, 1.); // local to the voxel
 
-            if (normal == vec3(0))
-            inter.uv = vec2(1);
+            inter.uv = abs(vec2(dot(u, pos_relative_to_voxel), dot(v, pos_relative_to_voxel)));
+
+            if (inter.normal == vec3(0.0))
+                inter.uv = vec2(1.0);
             break;
         }
 
@@ -292,19 +295,19 @@ IntersectionData rayTraceThroughVoxelGrid(RayData ray) {
 
         // here, everthing is sized relative to a voxel and we know we are already in
 
-        // faces: x = 0, y = 0, z = 0; left side of the inaquation
+        // faces: x = 0, y = 0, z = 0; left side of the inequality
         vec3 t0 = -pos_relative_to_voxel * ray.invDir;
-        // faces: x = Dx, y = Dy, z = Dz; right side of the inaquation
-        vec3 t1 = (vec3(1) - pos_relative_to_voxel) * ray.invDir;
+        // faces: x = Dx, y = Dy, z = Dz; right side of the inequality
+        vec3 t1 = (vec3(1.0) - pos_relative_to_voxel) * ray.invDir;
 
         for (int i = 0; i < 3; i++) {
-            if (ray.dir[i] < 0) {
+            if (ray.dir[i] < 0.0) {
                 float temp = t0[i];
                 t0[i] = t1[i];
                 t1[i] = temp;
             }
-            else if (are_close(ray.dir[i], 0)) {
-                t0[i] = t1[i] = -100000;
+            else if (are_close(ray.dir[i], 0.0)) {
+                t0[i] = t1[i] = -1e30;
             }
         }
 
@@ -312,10 +315,171 @@ IntersectionData rayTraceThroughVoxelGrid(RayData ray) {
         float higher_bound = min(min(t1.x, t1.y), t1.z);
 
         // Advance to next voxel with proper offset to avoid precision issues
-        grid_pos = grid_pos + (higher_bound + global.intersection_offset) * ray.dir;
-
-        _step++;
+        grid_pos = grid_pos + (higher_bound + global.ray_offset) * ray.dir;
     }
+
+
+    inter.grid_pos = grid_pos *= size;
+    inter.debug_info.x = float(step_count)/3.;
+
+    return inter;
+}
+
+
+IntersectionData rayTraceThroughVoxelOctree(RayData ray) {
+    IntersectionData inter;
+    inter.touched = false;
+
+    inter.debug_info = vec3(0.0, 0.0, 0.0);
+
+    float voxels_per_unit = voxels.voxels_per_unit;
+    float voxel_size = 1.0 / voxels_per_unit;
+    uint grid_size_u = voxels.grid_size;
+
+    // Convert to float grid pos; use float conversion and half-size properly
+    vec3 center_offset = vec3(float(voxels.grid_size) * 0.5);
+    vec3 grid_pos = ray.pos * voxels_per_unit + center_offset;
+
+    bool in_bounds = true;
+
+    // faces: x = 0, y = 0, z = 0; left side of the inequality
+    vec3 t0 = -grid_pos * ray.invDir;
+    // faces: x = Dx, y = Dy, z = Dz; right side of the inequality
+    vec3 t1 = (vec3(float(grid_size_u)) - grid_pos) * ray.invDir;
+
+    for (int i = 0; i < 3; i++) {
+        if (ray.dir[i] < 0.0) {
+            float temp = t0[i];
+            t0[i] = t1[i];
+            t1[i] = temp;
+        }
+    }
+
+    float lower_bound = max(max(t0.x, t0.y), t0.z);
+    float higher_bound = min(min(t1.x, t1.y), t1.z);
+
+    if (lower_bound >= higher_bound || higher_bound <= 0.0) {
+        in_bounds = false;
+    }
+    else {
+        grid_pos = grid_pos + (max(0.0, lower_bound) + global.ray_offset) * ray.dir;
+    }
+    //check alignment
+    // if (voxels.tree[5].children[3] != 0x0   ) {
+    //     inter.debug_info.y = 1.0; // indicate error
+    //     return inter;
+    // }
+
+    if (!in_bounds) {
+        return inter;
+    }
+
+   // debug, check the behaviour of `rayTraceThroughVoxelGrid`
+    // RayData new_ray;
+    // new_ray.dir = ray.dir;
+    // new_ray.invDir = ray.invDir;
+    // new_ray.pos = grid_pos;
+
+    // inter = rayTraceThroughVoxelGrid(new_ray, OctreeNode(PURE_LEAF, uint[8](0u,0u, 0u,0u,0u,0u,0u,0u)), float(grid_size_u)/2.);
+    // inter.grid_pos;
+
+    // return inter;
+    //
+
+
+    // Use global.max_steps if available
+    int max_steps = int(global.max_steps);
+    if (max_steps <= 0) max_steps = 10;
+    int _step = 0;
+
+    /* Now we can traverse the octree and see if we get an intersection */
+    // some initialisations
+    const int max_level = 16;  // seriously good luck having more than 2^16 voxels per axis
+    int level = 0;     // the root
+    int size = int(grid_size_u) / 2; // integer size
+
+    // This stack will keep track of the parent nodes in order to reduce the number of buffer lookup
+    OctreeNode stack[max_level];
+    ivec3 node_coord_stack[max_level];
+    stack[0] = voxels.tree[0];
+    node_coord_stack[0] = ivec3(0, 0, 0);
+
+    bool debug = false;
+
+    // Loop traversal - use signed level to avoid unsigned underflow
+    while (level >= 0 && _step < max_steps && !inter.touched) {
+        _step++;
+        // determine which child we are going to
+        float size_f = float(size);
+        ivec3 origin = node_coord_stack[level];
+        vec3 relative_pos = grid_pos - vec3(origin);
+        ivec3 child_coordinate = ivec3(floor(relative_pos / size_f));
+
+        if (child_coordinate.x < 0 || child_coordinate.y < 0 || child_coordinate.z < 0 ||
+            child_coordinate.x > 1 || child_coordinate.y > 1 || child_coordinate.z > 1) {
+            // out of bounds, pop up
+            size *= 2;
+            level--;
+            if (level < 0) {
+                //debug = true;
+            }
+            continue;
+        }
+
+        if (stack[level].node_type == NON_LEAF) {
+            int i = (child_coordinate.x << 2) + (child_coordinate.y << 1) + child_coordinate.z;
+            // fetch child index and bounds-check before using it
+            uint childIndex = stack[level].children[i];
+
+            level++;
+            node_coord_stack[level] = origin + child_coordinate * size;
+            size /= 2;
+            
+            if (childIndex == 0u || childIndex >= voxels.node_count) {
+                // treat as empty -> create a empty leaf that will be proccessed next iteration
+                stack[level] = OctreeNode(PURE_LEAF, uint[8](0u,0u,0u,0u,0u,0u,0u,0u));
+            }
+            else {
+                // push the child node to the stack
+                stack[level] = voxels.tree[childIndex];
+            }
+
+        } else {
+            // node is a leaf (PURE_LEAF or HETEROGENIOUS_LEAF)
+            RayData new_ray;
+            new_ray.dir = ray.dir;
+            new_ray.invDir = ray.invDir;
+            new_ray.pos = (grid_pos - vec3(origin));
+
+            // if (stack[level].node_type == PURE_LEAF) {
+            //      if (origin ==  ivec3(0, 8, 0))
+            //         debug = true;
+            // }
+
+            inter = rayTraceThroughVoxelGrid(new_ray, stack[level], size);
+            grid_pos = inter.grid_pos + vec3(origin);
+                
+            if (!inter.touched) {
+                // pop up
+                size *= 2;
+                level--;
+            } else {
+                // we have a hit, exit
+                debug = true;
+            }
+        }
+    }
+    inter.grid_pos = grid_pos;
+    inter.global_pos = (grid_pos - center_offset) / voxels_per_unit;
+
+    // debug info
+    inter.debug_info.z = float(_step) / float(30);
+    inter.debug_info.y = debug ? 1.0 : 0.;
+    if (_step > 50) {
+        inter.debug_info.x = 1.;
+    }
+
+    //inter.debug_info = grid_pos + vec3(origin);
 
     return inter;
 }

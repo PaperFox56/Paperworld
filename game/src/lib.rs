@@ -72,9 +72,10 @@ impl INode for Game {
             .unwrap();
 
         // fill the voxel data
-        let voxels_per_units: f32 = 5.;
+        let voxels_per_units: f32 = 4.;
 
-        let data = std::fs::read("assets/models/voxel_sphere.vx").expect("Couldn;t find the model");
+        // load the voxel data from file
+        let data = std::fs::read("assets/models/voxel_sphere_octree.vox").expect("Couldn't find the model");
 
         self.renderer
             .update_buffer(
@@ -88,10 +89,30 @@ impl INode for Game {
             .update_buffer(
                 "core",
                 "voxel_data",
-                16,
-                &PackedByteArray::from(data),
+                4,
+                &PackedByteArray::from(&data[16..20]), // grid size
             )
             .unwrap();
+
+        self.renderer
+            .update_buffer(
+                "core",
+                "voxel_data",
+                8,
+                &PackedByteArray::from(&data[32..36]), // node count
+            )
+            .unwrap();
+
+        self.renderer
+            .update_buffer(
+                "core",
+                "voxel_data",
+                12,
+                &PackedByteArray::from(&data[48..]), // octree data
+            )
+            .unwrap();
+
+        //godot_print!("First node {}", PackedByteArray::from(&data[48..96]).to_int32_array());
 
         // add a custom shader
     }

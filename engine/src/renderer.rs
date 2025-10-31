@@ -122,7 +122,7 @@ impl Renderer {
         }
 
         // Create a uniform buffer for the camera's data
-        const CAMERA_DATA_SIZE: u32 = 16; // number of float values in the struct
+        const CAMERA_DATA_SIZE: u32 = 20; // number of float values in the struct
         self.create_uniform_uniform("core", "camera", CAMERA_DATA_SIZE * 4, 1)
             .unwrap();
         self.update_buffer(
@@ -135,9 +135,9 @@ impl Renderer {
         .unwrap();
 
         // Create a storage buffer to receive the voxel data
-        // for now we allocate 64kB + 16 bits for the metadata,
+        // for now we allocate 1MB + 16 bits for the metadata,
         // at term we would like to have an object buffer and let the game allocate voxel buffers of arbitrary sizes
-        self.create_storage_uniform("core", "voxel_data", 1024 * 64 + 16, 2)
+        self.create_storage_uniform("core", "voxel_data", 1024 * 1024 + 16, 2)
             .unwrap();
 
         // assign the texture to the viewport
@@ -281,7 +281,7 @@ impl Renderer {
 
         self.execute_shader("voxel_shader", &["frame", "core"]);
 
-        //self.execute_shader("fragment", &["frame"]);
+        self.execute_shader("fragment", &["frame"]);
     }
 
     /// Create a new compute pipeline, bind the required uniforms, and call the shader
@@ -317,8 +317,8 @@ impl Renderer {
             );
         }
 
-        let x_groups = self.viewport_resolution.0 / 32;
-        let y_groups = self.viewport_resolution.1 / 32;
+        let x_groups = self.viewport_resolution.0 / 16;
+        let y_groups = self.viewport_resolution.1 / 16;
 
         self.rendering_device
             .compute_list_dispatch(compute_list, x_groups, y_groups, 1);
@@ -430,7 +430,8 @@ impl CameraData {
         out.extend(self.right.to_array());
         out.push(0.);
         out.extend(self.up.to_array());
-        out.push(self.fov);
+        out.push(0.);
+        out.extend(&[self.fov, 0., 0., 0.]);
 
         let out = PackedFloat32Array::from(out).to_byte_array();
 

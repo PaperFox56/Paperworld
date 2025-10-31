@@ -1,7 +1,7 @@
-#include <math.h>
+
 #include <stdio.h>
 
-#define GRID_SIZE 16
+#define GRID_SIZE 64
 #define VOXEL_COUNT GRID_SIZE * GRID_SIZE * GRID_SIZE
 
 /**
@@ -11,7 +11,7 @@
 
 int main(int args, char **argv) {
 
-    const unsigned int RADIUS = 8;
+    const int RADIUS = 1;
 
     unsigned int grid[VOXEL_COUNT] = {0};
 
@@ -23,7 +23,7 @@ int main(int args, char **argv) {
     for (int j = -grid_radius; j < grid_radius; j++) {
     for (int k = -grid_radius; k < grid_radius; k++) {
 
-        if (sqrtf(i*i + j*j + k*k) < RADIUS) {
+        if (i >= -RADIUS && i < RADIUS && j > -RADIUS && j < RADIUS && k > -RADIUS && k < RADIUS) {
             grid[index] = 1;
         } else {
             grid[index] = 0;
@@ -33,7 +33,7 @@ int main(int args, char **argv) {
     }}}
 
 
-    FILE *file = fopen("voxel_sphere.vox", "wb");
+    FILE *file = fopen("voxel_cube.vox", "wb");
 
     // we add padding because of the way the GPU pack data
     unsigned int grid_size[] = {GRID_SIZE, 0, 0, 0};
@@ -46,7 +46,7 @@ int main(int args, char **argv) {
     int r = fwrite(grid, sizeof(unsigned int), VOXEL_COUNT, file);
 
     fclose(file);
-    printf("%x", r);
+    printf("%x\n", r);
 
     return 0;
 }

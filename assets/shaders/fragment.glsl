@@ -22,8 +22,10 @@ void main() {
     float depth = extra.w;
 
     if (color == vec4(1.)) {
-        color = normal;
+        color =  vec4(uv.xyz, 1.);
     }
+
+    //color =  vec4(extra.xyz, 1.);
 
     imageStore(color_buffer, pixel, color);
 }
