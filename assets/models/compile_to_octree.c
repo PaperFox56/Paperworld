@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/types.h>
+#include <assert.h>
 
 #define MAX_NODES 1000000
 
@@ -51,55 +52,69 @@ void freeNode(OctreeNode *node) {
 void print_octree(const OctreeNode *root, int depth);
 bool validate_octree(const OctreeNodeGPU *nodes, uint32_t node_count);
 
-// A simple recursive function to fill the flat array
-uint32_t fill_flat_array(OctreeNode *node, uint32_t node_count,
-                         OctreeNodeGPU *flat_array) {
-  if (node == NULL)
-    return node_count;
+// Breadth-first (level order) traversal version
+uint32_t fill_flat_array(OctreeNode *root,
+                         OctreeNodeGPU *flat_array)
+{
+    if (!root) return 0;
 
-  if (node_count >= MAX_NODES)
-    printf("Fuck you %d\n", node_count);
+    uint32_t node_count = 0;
 
-  uint32_t current_index = node_count++;
-  OctreeNodeGPU *gpu_node = &flat_array[current_index];
+    // Simple queue to process nodes level by level
+    OctreeNode **queue = malloc(sizeof(OctreeNode*) * MAX_NODES);
+    uint32_t *index_queue = malloc(sizeof(uint32_t) * MAX_NODES);
+    assert(queue && index_queue);
 
-  if (node->is_leaf) {
-    gpu_node->node_type = PURE_LEAF;
-    for (int i = 0; i < 8; i++) {
-      gpu_node->children[i] = node->value;
-    }
-  } else {
+    uint32_t head = 0, tail = 0;
 
-    // If all children are leaves, we set the node as leaf and don't process the
-    // children The `children` field will contain the value of the children
-    // instead of indices. That means that in the flat array, a leaf node is in
-    // fact a 2x2x2 block of nodes.
+    // enqueue root
+    queue[tail] = root;
+    index_queue[tail] = node_count++;
+    tail++;
 
-    if (node->all_children_are_leaves) {
-      gpu_node->node_type = HETEROGENIOUS_LEAF;
-      for (int i = 0; i < 8; i++) {
-        if (node->children[i] != NULL) {
-          gpu_node->children[i] = node->children[i]->value;
+    while (head < tail) {
+        OctreeNode *node = queue[head];
+        uint32_t current_index = index_queue[head];
+        head++;
+
+        OctreeNodeGPU *gpu_node = &flat_array[current_index];
+
+        if (node->is_leaf) {
+            gpu_node->node_type = PURE_LEAF;
+            for (int i = 0; i < 8; i++) {
+                gpu_node->children[i] = node->value;
+            }
+        } else if (node->all_children_are_leaves) {
+            gpu_node->node_type = HETEROGENIOUS_LEAF;
+            for (int i = 0; i < 8; i++) {
+                if (node->children[i])
+                    gpu_node->children[i] = node->children[i]->value;
+                else
+                    gpu_node->children[i] = 0;
+            }
         } else {
-          gpu_node->children[i] = 0;
+            gpu_node->node_type = NON_LEAF;
+            for (int i = 0; i < 8; i++) {
+                if (node->children[i]) {
+                    gpu_node->children[i] = node_count;
+                    queue[tail] = node->children[i];
+                    index_queue[tail] = node_count;
+                    tail++;
+                    node_count++;
+                    if (node_count >= MAX_NODES)
+                        printf("Warning: node overflow (%u)\n", node_count);
+                } else {
+                    gpu_node->children[i] = 0; // invalid
+                }
+            }
         }
-      }
-    } else {
-      gpu_node->node_type = NON_LEAF;
-
-      for (int i = 0; i < 8; i++) {
-        if (node->children[i] == NULL)
-          gpu_node->children[i] = 0;  // invalid index
-        else {
-          gpu_node->children[i] = node_count;
-          node_count = fill_flat_array(node->children[i], node_count, flat_array);
-        }
-      }
     }
-  }
 
-  return node_count;
+    free(queue);
+    free(index_queue);
+    return node_count;
 }
+
 
 int main(int args, char **argv) {
   // get the file name from command line
@@ -169,7 +184,7 @@ int main(int args, char **argv) {
       (OctreeNodeGPU *)malloc(sizeof(OctreeNodeGPU) * MAX_NODES);
   uint32_t node_count = 0;
 
-  node_count = fill_flat_array(root, node_count, flat_array);
+  node_count = fill_flat_array(root, flat_array);
 
   printf("Nodes: %d\n", node_count);
 

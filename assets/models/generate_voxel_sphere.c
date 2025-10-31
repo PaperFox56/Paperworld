@@ -1,7 +1,7 @@
 #include <math.h>
 #include <stdio.h>
 
-#define GRID_SIZE 16
+#define GRID_SIZE 64
 #define VOXEL_COUNT GRID_SIZE * GRID_SIZE * GRID_SIZE
 
 /**
@@ -11,7 +11,7 @@
 
 int main(int args, char **argv) {
 
-    const unsigned int RADIUS = 8;
+    const unsigned int RADIUS = 16;
 
     unsigned int grid[VOXEL_COUNT] = {0};
 

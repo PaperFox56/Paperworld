@@ -25,7 +25,7 @@ void main() {
         color =  vec4(uv.xyz, 1.);
     }
 
-    //color =  vec4(extra.xyz, 1.);
+    color =  vec4(extra.xyz, 1.);
 
     imageStore(color_buffer, pixel, color);
 }

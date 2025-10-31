@@ -318,7 +318,7 @@ impl Renderer {
         }
 
         let x_groups = self.viewport_resolution.0 / 16;
-        let y_groups = self.viewport_resolution.1 / 16;
+        let y_groups = self.viewport_resolution.1 / 8;
 
         self.rendering_device
             .compute_list_dispatch(compute_list, x_groups, y_groups, 1);
